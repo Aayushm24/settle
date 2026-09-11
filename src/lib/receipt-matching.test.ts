@@ -53,6 +53,24 @@ describe("receipt matching", () => {
     expect(matchedTransaction?.merchant).toContain("RIDE-7788");
   });
 
+  it("parses exported email receipt dates and fields separated by line breaks", () => {
+    const receipt = parseReceiptText(
+      [
+        "Booking confirmation / Receipt",
+        "Playtomic Club",
+        "Date 8/30/26",
+        "Paid IDR156,000.00 (taxes included)",
+        "Name",
+        "Member Delta",
+      ].join("\n"),
+      "booking.pdf",
+    );
+
+    expect(receipt.date).toBe("2026-08-30");
+    expect(receipt.currency).toBe("IDR");
+    expect(receipt.totalAmountMinor).toBe(156000);
+  });
+
   it("parses labeled totals and prefers final total over first amount", () => {
     const receipt = parseReceiptText(
       [

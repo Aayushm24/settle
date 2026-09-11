@@ -121,4 +121,32 @@ describe("Standard Chartered parser", () => {
     expect(rows[0].merchant).toContain("Transit Lane");
     expect(rows[0].postedAmountMinor).toBe(10931);
   });
+
+  it("parses DD/MM/YYYY row starts", () => {
+    const rows = parseStandardCharteredStatement({
+      text: "26/08/2026,Transit Lane ZX-ALPHA,IDR 20200.00,109.31",
+      sourceName: "statement.csv",
+      uploaderId: "member_1",
+      tripStartDate: "2026-08-23",
+      tripEndDate: "2026-09-02",
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].date).toBe("2026-08-26");
+    expect(rows[0].merchant).toContain("Transit Lane");
+  });
+
+  it("parses YYYY-MM-DD row starts", () => {
+    const rows = parseStandardCharteredStatement({
+      text: "2026-08-26 Transit Lane ZX-ALPHA IDR 20200.00 109.31",
+      sourceName: "statement.txt",
+      uploaderId: "member_1",
+      tripStartDate: "2026-08-23",
+      tripEndDate: "2026-09-02",
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].date).toBe("2026-08-26");
+    expect(rows[0].postedAmountMinor).toBe(10931);
+  });
 });

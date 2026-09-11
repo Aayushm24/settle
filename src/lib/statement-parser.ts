@@ -1,4 +1,4 @@
-import { isInclusiveDateInRange, parseDdMmYy } from "@/lib/date";
+import { isInclusiveDateInRange, parseDdMmYy, parseIsoDate } from "@/lib/date";
 import { sanitizeSpreadsheetText } from "@/lib/csv";
 import { stableHash } from "@/lib/id";
 import { parseAmountToMinorUnits } from "@/lib/money";
@@ -26,7 +26,7 @@ interface ParsedStatementRow {
   rawText: string;
 }
 
-const START_PATTERN = /^(\d{6})(?:\s+|,)(.+)$/;
+const START_PATTERN = /^(\d{6}|\d{1,2}\/\d{1,2}\/\d{4}|20\d{2}-\d{1,2}-\d{1,2})(?:\s+|,)(.+)$/;
 
 interface CurrencyAmountToken {
   currency: string;
@@ -45,16 +45,63 @@ function extractReference(text: string): string | null {
   return match ? match[0].toUpperCase() : null;
 }
 
+function parseDateToken(dateToken: string): string | null {
+  if (/^\d{6}$/.test(dateToken)) {
+    try {
+      return parseDdMmYy(dateToken);
+    } catch {
+      return null;
+    }
+  }
+
+  const slashDate = dateToken.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (slashDate) {
+    const day = Number.parseInt(slashDate[1], 10);
+    const month = Number.parseInt(slashDate[2], 10);
+    const year = Number.parseInt(slashDate[3], 10);
+    const iso = `${year.toString().padStart(4, "0")}-${month
+      .toString()
+      .padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+    try {
+      parseIsoDate(iso);
+      return iso;
+    } catch {
+      return null;
+    }
+  }
+
+  const isoDate = dateToken.match(/^(20\d{2})-(\d{1,2})-(\d{1,2})$/);
+  if (isoDate) {
+    const year = Number.parseInt(isoDate[1], 10);
+    const month = Number.parseInt(isoDate[2], 10);
+    const day = Number.parseInt(isoDate[3], 10);
+    const iso = `${year.toString().padStart(4, "0")}-${month
+      .toString()
+      .padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+    try {
+      parseIsoDate(iso);
+      return iso;
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
 function parseRow(rawRow: string): ParsedStatementRow | null {
   const match = START_PATTERN.exec(rawRow.trim());
   if (!match) {
     return null;
   }
 
-  const ddmmyy = match[1];
+  const dateToken = match[1];
   const payload = match[2].replaceAll(/\s+/g, " ").trim();
   const payloadWithoutCredit = payload.replace(/\bCR\b/gi, "").replaceAll(/\s+/g, " ").trim();
-  const date = parseDdMmYy(ddmmyy);
+  const date = parseDateToken(dateToken);
+  if (!date) {
+    return null;
+  }
 
   const hasCreditMarker = /\bCR\b/i.test(payload);
   const isPayment = /scb\s+ibanking\s+payment/i.test(payload);

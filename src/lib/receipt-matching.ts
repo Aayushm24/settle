@@ -237,6 +237,15 @@ function parseReceiptDate(text: string): string | null {
     }
   }
 
+  const numericShort = text.match(/\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b/);
+  if (numericShort) {
+    const month = Number.parseInt(numericShort[1], 10);
+    const day = Number.parseInt(numericShort[2], 10);
+    const rawYear = Number.parseInt(numericShort[3], 10);
+    const iso = normalizeIsoDate(rawYear < 100 ? 2000 + rawYear : rawYear, month, day);
+    if (iso) return iso;
+  }
+
   const dayFirst = text.match(/\b(\d{1,2})\s+([A-Za-z]{3,9})\s*,?\s*(20\d{2})\b/);
   if (dayFirst) {
     const day = Number.parseInt(dayFirst[1], 10);
@@ -302,6 +311,7 @@ export function parseReceiptText(text: string, sourceName: string): ReceiptEvide
   }
 
   const merchantLine =
+    lines.find((line) => /\b(grab|go(?:car|jek)|playtomic|padel|restaurant|hotel|villa|ferry|boat)\b/i.test(line)) ??
     lines.find(
       (line) =>
         line.length > 0 &&
@@ -309,9 +319,9 @@ export function parseReceiptText(text: string, sourceName: string): ReceiptEvide
         !/^(date|paid|total|booking|order|trip id|receipt no)\b/i.test(line),
     ) ?? sourceName;
 
-  const passengerMatch = text.match(/passenger\s*[:=-]\s*([^\n\r]+)/i);
-  const profileMatch = text.match(/profile\s*[:=-]\s*([^\n\r]+)/i);
-  const serviceMatch = text.match(/service\s*[:=-]\s*([^\n\r]+)/i);
+  const passengerMatch = text.match(/passenger\s*(?::|=|-|\r?\n)\s*([^\n\r]+)/i);
+  const profileMatch = text.match(/profile\s*(?::|=|-|\r?\n)\s*([^\n\r]+)/i);
+  const serviceMatch = text.match(/service\s*(?::|=|-|\r?\n)\s*([^\n\r]+)/i);
 
   return {
     id: `receipt_${stableHash(`${sourceName}:${text}`)}`,

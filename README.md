@@ -1,53 +1,41 @@
 # Settle MVP
 
-Settle is a local-first trip settlement app that turns statement rows and receipts into a reviewable group ledger and an exact minimum-transfer plan.
+Settle is a local-first AI reconciliation workbench for group trips. You drop statements and receipts, Settle extracts and classifies them, then you review one transaction at a time until the settlement is complete.
 
-The app runs in explicit local-only mode using `localStorage`. Multi-user cloud sharing is not active in this build.
+Data is saved in `localStorage` only. There is no cloud sync or multi-user backend in this build.
 
-## What is implemented
+## Product flow
 
-- Trip setup at root route (no landing page).
-- Fixed default pilot window: `2026-08-23` through `2026-09-02` (editable).
-- Main product flow tabs:
-  - Dashboard
-  - Transaction review
-  - Expenses
-  - Settlement
-  - Settings
-- Add action supports:
-  - Manual expense entry
-  - Statement CSV/text import
-  - Receipt upload/pasted text
-- Standard Chartered parser supports:
-  - DDMMYY dates
-  - Wrapped merchant descriptions
-  - Original + INR posted amounts
-  - `CR` credits as negative values
-  - Forex Markup Fee / CGST / SGST rows as reviewable fee/tax items
-  - Payment-row exclusion (`SCB Ibanking Payment`)
-- Split modes:
-  - Equal
-  - Exact amounts
-  - Shares/weights
-  - Personal
-  - Mixed handled through exact allocations
-- Deterministic ledger logic:
-  - Integer minor-unit math only
-  - Zero-sum member balances
-  - Exact minimum-transfer search for 2-10 members, bounded with a deterministic simplified fallback for oversized legacy data
-- Likely-personal and receipt-match evidence surfaced as explainable suggestions.
-- Lock snapshot with auto-invalidation on ledger-affecting changes.
-- CSV export with formula-safe sanitization.
-- Privacy-safe demo seed to test a full trip flow without real data.
+- Setup starts with a minimal prompt: creator, trip name, dates, settlement currency, friend names, and one universal file drop zone.
+- Upload is unified. Statement and receipt files go through one queue with per-file status: `queued`, `reading`, `extracted`, `imported`, `receipt_added`, `needs_help`, `failed`.
+- Classification is deterministic from extracted structure first:
+  - many `DDMMYY` rows -> statement
+  - date-prefixed non-pilot rows (`DD/MM/YYYY` or `YYYY-MM-DD`) -> possible statement (manual recovery)
+  - totals/booking/passenger/order style evidence -> receipt
+  - user can override per file when confidence is low
+- Statement importer in this pilot currently supports Standard Chartered layouts. Other layouts are surfaced as possible statement and require recovery cleanup before import.
+- Extraction stays real:
+  - PDF text extraction with pdf.js
+  - local OCR for images and scanned PDF pages with Tesseract.js
+  - recovery drawer appears only when extraction/import needs help
+- Review loop is sequential and explicit. Every transaction must end as excluded/payment or linked to an approved expense.
+- Focused transaction card includes merchant, date, amounts, payer, split, confidence, and evidence.
+- Command bar is deterministic client logic (no fake AI call):
+  - `this was only me` / `only me` / `personal`
+  - `shared by everyone` / `split between everyone` / `all of us`
+  - `split between X, Y`
+  - `X paid` / `X paid this in cash`
+  - `attach receipt X` / `match this to receipt X`
+  - `exclude this` / `include this`
+- Draft settlement updates live with reviewed count, unresolved amount, balances, and minimum transfers.
 
-## Security and privacy notes
+## Security and privacy
 
-- Local mode does not read public env vars for cloud sync.
-- Multi-user sharing is disabled in local mode.
-- File upload validation enforces allowed MIME type plus matching allowed extension (or extension-only fallback when browser MIME is empty) and 8 MB limits.
-- Automatic PDF/image model extraction is not implemented in this local-only pilot; files require paste/manual parsing.
-- Parsed data is always reviewable draft data until approved.
-- Audit events store redacted change summaries, not raw statement text or full source payloads.
+- Local-only storage. No public env var auto-sync path.
+- File validation enforces size and allowed extension/MIME combinations.
+- Parsed data remains draft until explicit per-transaction review.
+- Source and financial details are not shared externally by default.
+- OCR worker and language assets are fetched by Tesseract.js at runtime; extracted content remains in-browser.
 
 ## Local development
 
@@ -58,35 +46,21 @@ npm run dev
 
 Open `http://localhost:3000`.
 
-## Environment contract
-
-Copy `.env.example` to `.env.local`.
-
-- Local mode: no variables are required.
-
-Never commit real secret values.
-
-## Deploy
-
-- Vercel or any Next.js host:
-  - Build command: `npm run build`
-  - Start command: `npm start`
-- Local-only deployment: no cloud persistence variables required.
-
-## Tests and verification
+## Verification
 
 ```bash
 npm test
 npm run lint
 npm run build
+npm audit --audit-level=high
 ```
 
-Vitest covers parsing, date inclusivity, likely-personal logic, receipt matching, split rounding, ledger zero-sum, and minimum transfers.
+Vitest covers statement parsing, receipt matching, split math, ledger transfer planning, file classification, review progress, and command parsing.
 
-## Multi-user sharing status
+## Sharing status
 
-- Current status: disabled. This app persists to browser-local storage only.
-- To safely enable secure sharing later, add a server-backed persistence layer with per-user identity, per-trip authorization, RLS default-deny policies, encrypted storage paths for uploads, and server-side audit redaction controls.
+- Current status: single-device local mode only.
+- Share action copies a plain-text draft settlement, not a live collaboration link.
 
 ## Architecture notes
 

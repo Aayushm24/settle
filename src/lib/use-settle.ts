@@ -23,6 +23,10 @@ import { buildAllocations } from "@/lib/splits";
 import { parseStandardCharteredStatement } from "@/lib/statement-parser";
 import { detectLikelyPersonalExpense } from "@/lib/personal-flag";
 import {
+  excludeTransactionWithLinkedDraft,
+  includeTransactionWithRestore,
+} from "@/lib/transaction-inclusion";
+import {
   AuditEvent,
   Expense,
   ExpenseComment,
@@ -77,6 +81,21 @@ interface ImportResult {
   duplicateCount: number;
 }
 
+interface ActionResult {
+  ok: boolean;
+  reason: string | null;
+}
+
+interface ExcludeTransactionResult extends ActionResult {
+  removedExpense: Expense | null;
+  removedComments: ExpenseComment[];
+}
+
+interface IncludeTransactionOptions {
+  restoreExpense?: Expense | null;
+  restoreComments?: ExpenseComment[];
+}
+
 interface SettlementComputation {
   ledgers: MemberLedger[];
   transfers: Transfer[];
@@ -91,7 +110,7 @@ interface LockBlockers {
   unconfirmedPersonalExpenses: number;
 }
 
-const MIN_MEMBERS = 2;
+const MIN_MEMBERS = 1;
 const MAX_MEMBERS = 10;
 
 const EMPTY_STATE: SettleState = {
@@ -240,6 +259,20 @@ function defaultTrip(): Trip {
     fixedTripRate: null,
     createdAt: nowIso(),
   };
+}
+
+function normalizeUniqueNames(names: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const name of names.map((value) => value.trim()).filter(Boolean)) {
+    const key = name.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    unique.push(name);
+  }
+  return unique;
 }
 
 function withAudit(
@@ -408,43 +441,35 @@ export function useSettle() {
   }, []);
 
   const createTrip = useCallback(
-    (input: TripSetupInput) => {
+    (input: TripSetupInput): ActionResult => {
       let startTime: number;
       let endTime: number;
       try {
         startTime = parseIsoDate(input.startDate).getTime();
         endTime = parseIsoDate(input.endDate).getTime();
       } catch {
-        setError("Trip dates must be valid calendar dates.");
-        return;
+        const reason = "Trip dates must be valid calendar dates.";
+        setError(reason);
+        return { ok: false, reason };
       }
 
       if (endTime < startTime) {
-        setError("Trip end date must be on or after the start date.");
-        return;
+        const reason = "Trip end date must be on or after the start date.";
+        setError(reason);
+        return { ok: false, reason };
       }
 
       if (
         input.defaultFxRule === "fixed_trip" &&
         (input.fixedTripRate === null || !Number.isFinite(input.fixedTripRate) || input.fixedTripRate <= 0)
       ) {
-        setError("Fixed trip rate must be a positive number.");
-        return;
+        const reason = "Fixed trip rate must be a positive number.";
+        setError(reason);
+        return { ok: false, reason };
       }
 
       const creatorMemberId = makeId("member");
-      const seenNames = new Set<string>();
-      const members = [input.creatorName, ...input.friendNames]
-        .map((name) => name.trim())
-        .filter((name) => name.length > 0)
-        .filter((name) => {
-          const key = name.toLowerCase();
-          if (seenNames.has(key)) {
-            return false;
-          }
-          seenNames.add(key);
-          return true;
-        })
+      const members = normalizeUniqueNames([input.creatorName, ...input.friendNames])
         .map((name, index) => ({
           id: index === 0 ? creatorMemberId : makeId("member"),
           name,
@@ -452,8 +477,9 @@ export function useSettle() {
         }));
 
       if (members.length < MIN_MEMBERS || members.length > MAX_MEMBERS) {
-        setError(`Settle supports ${MIN_MEMBERS} to ${MAX_MEMBERS} members per trip.`);
-        return;
+        const reason = `Settle supports ${MIN_MEMBERS} to ${MAX_MEMBERS} members per trip.`;
+        setError(reason);
+        return { ok: false, reason };
       }
 
       const trip = {
@@ -480,6 +506,7 @@ export function useSettle() {
       void repository.save(next).catch((saveError: unknown) => {
         setError(saveError instanceof Error ? saveError.message : "Failed to save state");
       });
+      return { ok: true, reason: null };
     },
     [repository],
   );
@@ -492,6 +519,65 @@ export function useSettle() {
       }));
     },
     [updateState],
+  );
+
+  const addMember = useCallback(
+    (name: string): ActionResult => {
+      const actorId = state.activeMemberId;
+      if (!state.trip || !actorId) {
+        const reason = "Trip is not initialized.";
+        setError(reason);
+        return { ok: false, reason };
+      }
+
+      const trimmedName = name.trim();
+      if (!trimmedName) {
+        const reason = "Member name is required.";
+        setError(reason);
+        return { ok: false, reason };
+      }
+
+      if (state.members.length >= MAX_MEMBERS) {
+        const reason = `Settle supports up to ${MAX_MEMBERS} members per trip.`;
+        setError(reason);
+        return { ok: false, reason };
+      }
+
+      const duplicate = state.members.some(
+        (member) => member.name.trim().toLowerCase() === trimmedName.toLowerCase(),
+      );
+      if (duplicate) {
+        const reason = `Member '${trimmedName}' already exists.`;
+        setError(reason);
+        return { ok: false, reason };
+      }
+
+      const member = {
+        id: makeId("member"),
+        name: trimmedName,
+        active: true,
+      };
+
+      updateState((previous) => {
+        const nextMembers = [...previous.members, member];
+        return withAudit(
+          {
+            ...previous,
+            members: nextMembers,
+          },
+          actorId,
+          "trip",
+          previous.trip?.id ?? "trip",
+          "trip.member_added",
+          previous.members,
+          nextMembers,
+        );
+      });
+
+      setError(null);
+      return { ok: true, reason: null };
+    },
+    [state.activeMemberId, state.members, state.trip, updateState],
   );
 
   const seedDemoTrip = useCallback(() => {
@@ -780,42 +866,46 @@ export function useSettle() {
         tripEndDate: state.trip.endDate,
       });
 
-      const seenFingerprints = new Set(
-        state.statementTransactions.map((transaction) => transaction.fingerprint),
-      );
-      const unique: StatementTransaction[] = [];
+      let addedCount = 0;
       let duplicateCount = 0;
 
-      for (const transaction of parsed) {
-        if (seenFingerprints.has(transaction.fingerprint)) {
-          duplicateCount += 1;
-          continue;
+      updateState((previous) => {
+        const seenFingerprints = new Set(
+          previous.statementTransactions.map((transaction) => transaction.fingerprint),
+        );
+        const unique: StatementTransaction[] = [];
+
+        for (const transaction of parsed) {
+          if (seenFingerprints.has(transaction.fingerprint)) {
+            duplicateCount += 1;
+            continue;
+          }
+
+          seenFingerprints.add(transaction.fingerprint);
+          unique.push(transaction);
         }
 
-        seenFingerprints.add(transaction.fingerprint);
-        unique.push(transaction);
-      }
+        addedCount = unique.length;
 
-      updateState((previous) => ({
-        ...previous,
-        statementTransactions: [...unique, ...previous.statementTransactions],
-      }));
+        return {
+          ...previous,
+          statementTransactions: [...unique, ...previous.statementTransactions],
+        };
+      });
 
-      return {
-        addedCount: unique.length,
-        duplicateCount,
-      };
+      return { addedCount, duplicateCount };
     },
-    [state.activeMemberId, state.trip, state.statementTransactions, updateState],
+    [state.activeMemberId, state.trip, updateState],
   );
 
   const addSourceDraft = useCallback(
     (name: string, kind: "statement" | "receipt", reason: string) => {
       const actorId = state.activeMemberId;
+      const draftId = makeId("draft");
 
       updateState((previous) => {
         const draft = {
-          id: makeId("draft"),
+          id: draftId,
           name,
           kind,
           reason,
@@ -844,6 +934,7 @@ export function useSettle() {
           draft,
         );
       });
+      return draftId;
     },
     [state.activeMemberId, updateState],
   );
@@ -961,12 +1052,15 @@ export function useSettle() {
   );
 
   const setTransactionInclusion = useCallback(
-    (transactionId: string, inclusionState: "included" | "excluded") => {
+    (transactionId: string, inclusionState: "included" | "excluded"): ActionResult => {
       const actorId = state.activeMemberId;
       if (!actorId) {
-        return;
+        const reason = "No active member";
+        setError(reason);
+        return { ok: false, reason };
       }
 
+      let changed = false;
       updateState((previous) => {
         const index = previous.statementTransactions.findIndex(
           (transaction) => transaction.id === transactionId,
@@ -980,6 +1074,7 @@ export function useSettle() {
           ...before,
           inclusionState,
         };
+        changed = true;
 
         const nextTransactions = [...previous.statementTransactions];
         nextTransactions[index] = updated;
@@ -997,8 +1092,197 @@ export function useSettle() {
           updated,
         );
       });
+
+      if (!changed) {
+        const reason = "Transaction not found.";
+        setError(reason);
+        return { ok: false, reason };
+      }
+
+      setError(null);
+      return { ok: true, reason: null };
     },
     [state.activeMemberId, updateState],
+  );
+
+  const excludeTransaction = useCallback(
+    (transactionId: string): ExcludeTransactionResult => {
+      const actorId = state.activeMemberId;
+      if (!actorId) {
+        const reason = "No active member";
+        setError(reason);
+        return { ok: false, reason, removedExpense: null, removedComments: [] };
+      }
+
+      const plannedMutation = excludeTransactionWithLinkedDraft(
+        state.statementTransactions,
+        state.expenses,
+        state.comments,
+        transactionId,
+      );
+      if (!plannedMutation.ok) {
+        const reason = plannedMutation.error ?? "Could not exclude transaction.";
+        setError(reason);
+        return {
+          ok: false,
+          reason,
+          removedExpense: null,
+          removedComments: [],
+        };
+      }
+
+      updateState((previous) => {
+        const mutation = excludeTransactionWithLinkedDraft(
+          previous.statementTransactions,
+          previous.expenses,
+          previous.comments,
+          transactionId,
+        );
+
+        if (!mutation.ok) {
+          return previous;
+        }
+
+        const beforeTransaction = previous.statementTransactions.find(
+          (transaction) => transaction.id === transactionId,
+        );
+        const afterTransaction = mutation.transactions.find(
+          (transaction) => transaction.id === transactionId,
+        );
+        if (!beforeTransaction || !afterTransaction) {
+          return previous;
+        }
+
+        let next = invalidateSnapshot({
+          ...previous,
+          statementTransactions: mutation.transactions,
+          expenses: mutation.expenses,
+          comments: mutation.comments,
+        });
+
+        next = withAudit(
+          next,
+          actorId,
+          "transaction",
+          transactionId,
+          "transaction.excluded",
+          beforeTransaction,
+          afterTransaction,
+        );
+
+        if (mutation.removedExpense) {
+          next = withAudit(
+            next,
+            actorId,
+            "expense",
+            mutation.removedExpense.id,
+            "expense.removed_for_transaction_exclusion",
+            mutation.removedExpense,
+            null,
+          );
+        }
+
+        return next;
+      });
+
+      setError(null);
+      return {
+        ok: true,
+        reason: null,
+        removedExpense: plannedMutation.removedExpense,
+        removedComments: plannedMutation.removedComments,
+      };
+    },
+    [state.activeMemberId, state.comments, state.expenses, state.statementTransactions, updateState],
+  );
+
+  const includeTransaction = useCallback(
+    (transactionId: string, options?: IncludeTransactionOptions): ActionResult => {
+      const actorId = state.activeMemberId;
+      if (!actorId) {
+        const reason = "No active member";
+        setError(reason);
+        return { ok: false, reason };
+      }
+
+      const plannedMutation = includeTransactionWithRestore(
+        state.statementTransactions,
+        state.expenses,
+        state.comments,
+        transactionId,
+        {
+          expense: options?.restoreExpense ?? null,
+          comments: options?.restoreComments ?? [],
+        },
+      );
+      if (!plannedMutation.ok) {
+        const reason = plannedMutation.error ?? "Could not include transaction.";
+        setError(reason);
+        return { ok: false, reason };
+      }
+
+      updateState((previous) => {
+        const mutation = includeTransactionWithRestore(
+          previous.statementTransactions,
+          previous.expenses,
+          previous.comments,
+          transactionId,
+          {
+            expense: options?.restoreExpense ?? null,
+            comments: options?.restoreComments ?? [],
+          },
+        );
+
+        if (!mutation.ok) {
+          return previous;
+        }
+
+        const beforeTransaction = previous.statementTransactions.find(
+          (transaction) => transaction.id === transactionId,
+        );
+        const afterTransaction = mutation.transactions.find(
+          (transaction) => transaction.id === transactionId,
+        );
+        if (!beforeTransaction || !afterTransaction) {
+          return previous;
+        }
+
+        let next = invalidateSnapshot({
+          ...previous,
+          statementTransactions: mutation.transactions,
+          expenses: mutation.expenses,
+          comments: mutation.comments,
+        });
+
+        next = withAudit(
+          next,
+          actorId,
+          "transaction",
+          transactionId,
+          "transaction.included",
+          beforeTransaction,
+          afterTransaction,
+        );
+
+        if (mutation.restoredExpense && options?.restoreExpense) {
+          next = withAudit(
+            next,
+            actorId,
+            "expense",
+            options.restoreExpense.id,
+            "expense.restored_after_transaction_include",
+            null,
+            options.restoreExpense,
+          );
+        }
+
+        return next;
+      });
+
+      setError(null);
+      return { ok: true, reason: null };
+    },
+    [state.activeMemberId, state.comments, state.expenses, state.statementTransactions, updateState],
   );
 
   const addManualExpense = useCallback(
@@ -1249,6 +1533,10 @@ export function useSettle() {
           fxRate: input.fxRate,
           likelyPersonal,
           personalClassificationConfirmed,
+          status: before.status === "approved" ? "reopened" : before.status,
+          approvedBy: before.status === "approved" ? null : before.approvedBy,
+          approvedAt: before.status === "approved" ? null : before.approvedAt,
+          reopenedAt: before.status === "approved" ? nowIso() : before.reopenedAt,
           updatedAt: nowIso(),
         };
 
@@ -1288,7 +1576,13 @@ export function useSettle() {
         return false;
       }
 
-      const approval = canApproveExpense(target);
+      const targetForApproval =
+        target.likelyPersonal.likely &&
+        target.splitMode === "personal" &&
+        !target.personalClassificationConfirmed
+          ? { ...target, personalClassificationConfirmed: true }
+          : target;
+      const approval = canApproveExpense(targetForApproval);
       if (!approval.ok) {
         setError(approval.reason);
         return false;
@@ -1303,6 +1597,9 @@ export function useSettle() {
         const before = previous.expenses[index];
         const updated: Expense = {
           ...before,
+          personalClassificationConfirmed:
+            before.personalClassificationConfirmed ||
+            (before.likelyPersonal.likely && before.splitMode === "personal"),
           status: "approved",
           approvedBy: actorId,
           approvedAt: nowIso(),
@@ -1558,6 +1855,10 @@ export function useSettle() {
           likelyPersonal,
           personalClassificationConfirmed:
             !likelyPersonal.likely || before.splitMode !== "personal" || before.personalClassificationConfirmed,
+          status: before.status === "approved" ? "reopened" : before.status,
+          approvedBy: before.status === "approved" ? null : before.approvedBy,
+          approvedAt: before.status === "approved" ? null : before.approvedAt,
+          reopenedAt: before.status === "approved" ? nowIso() : before.reopenedAt,
           updatedAt: nowIso(),
         };
 
@@ -1665,12 +1966,15 @@ export function useSettle() {
       createTrip,
       seedDemoTrip,
       setActiveMember,
+      addMember,
       importStatementText,
       addSourceDraft,
       resolveSourceDraft,
       removeSourceDraft,
       addReceiptFromText,
       setTransactionInclusion,
+      excludeTransaction,
+      includeTransaction,
       addManualExpense,
       createExpenseFromTransaction,
       updateExpenseDraft,
