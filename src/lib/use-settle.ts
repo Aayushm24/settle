@@ -394,34 +394,18 @@ export function useSettle() {
   );
 
   useEffect(() => {
-    let cancelled = false;
-    void Promise.resolve()
-      .then(() => repository.load())
-      .then((loaded) => {
-        if (cancelled) {
-          return;
+    const raw = window.localStorage.getItem("settle_state_v1");
+    queueMicrotask(() => {
+      if (raw) {
+        try {
+          setState(applyStateMigrations(JSON.parse(raw) as SettleState));
+        } catch {
+          window.localStorage.removeItem("settle_state_v1");
         }
-        if (loaded) {
-          const migrated = applyStateMigrations(loaded);
-          setState(migrated);
-          void repository.save(migrated).catch(() => {
-            // Ignore migration persistence failures during bootstrap.
-          });
-        }
-        setReady(true);
-      })
-      .catch((loadError: unknown) => {
-        if (cancelled) {
-          return;
-        }
-        setError(loadError instanceof Error ? loadError.message : "Failed to load state");
-        setReady(true);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [repository]);
+      }
+      setReady(true);
+    });
+  }, []);
 
   const createTrip = useCallback(
     (input: TripSetupInput) => {
