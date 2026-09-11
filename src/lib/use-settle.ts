@@ -395,8 +395,8 @@ export function useSettle() {
 
   useEffect(() => {
     let cancelled = false;
-    void repository
-      .load()
+    void Promise.resolve()
+      .then(() => repository.load())
       .then((loaded) => {
         if (cancelled) {
           return;

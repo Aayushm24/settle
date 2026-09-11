@@ -120,7 +120,7 @@ export default function Home() {
 
   const [setupForm, setSetupForm] = useState<SetupFormState>({
     creatorName: "",
-    tripName: "Demo Team Trip",
+    tripName: "Bali Trip",
     startDate: PILOT_START_DATE,
     endDate: PILOT_END_DATE,
     settlementCurrency: DEFAULT_SETTLEMENT_CURRENCY,
